@@ -1,0 +1,243 @@
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: proy
+    Description: Nombre del entorno (ej. dev, prod)
+  NetworkStackName:
+    Type: String
+    Default: red
+    Description: Nombre del stack de red
+  ServiceName:
+    Type: String
+    Description: Nombre del servicio ECS
+  DesiredCount:
+    Type: Number
+    Default: 2
+    Description: Número deseado de tareas ECS
+  ContainerPort:
+    Type: Number
+    Default: 5000
+    Description: Puerto del contenedor
+  ContainerImage:
+    Type: String
+    Description: URI de la imagen del contenedor en ECR
+
+Resources:
+  # Cluster de ECS
+  proyEcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub ${EnvironmentName}-Cluster
+
+  # Grupo de autoescalado
+  proyEcsAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn:
+      - proyEcsCluster
+    Properties:
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub ${NetworkStackName}-proy-PrivateSubnet1Id
+        - Fn::ImportValue: !Sub ${NetworkStackName}-proy-PrivateSubnet2Id
+      LaunchTemplate:
+        LaunchTemplateId: !Ref proycontainerInstances
+        Version: !GetAtt proycontainerInstances.LatestVersionNumber
+      MinSize: 4
+      MaxSize: 6
+      NewInstancesProtectedFromScaleIn: true
+    UpdatePolicy:
+      AutoScalingReplacingUpdate:
+        WillReplace: "true"
+
+  # Configuración para cada instancia añadida al cluster
+  proycontainerInstances:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: "asgLaunchTemplate"
+      LaunchTemplateData:
+        ImageId: !Sub "{{resolve:ssm:/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id}}"
+        InstanceType: t2.micro
+        IamInstanceProfile:
+          Arn: !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/LabInstanceProfile
+        SecurityGroupIds:
+          - !Ref proyPrivateFlaskSecurityGroup
+        UserData:
+          Fn::Base64: !Sub |
+           #!/bin/bash -xe
+            echo ECS_CLUSTER=${proyEcsCluster} >> /etc/ecs/ecs.config
+            yum install -y aws-cfn-bootstrap
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackId} --resource containerInstances --configsets full_install --region ${AWS::Region} &
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+
+  proyCapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      AutoScalingGroupProvider:
+        AutoScalingGroupArn: !Ref proyEcsAutoScalingGroup
+        ManagedScaling:
+          InstanceWarmupPeriod: 60
+          MinimumScalingStepSize: 1
+          MaximumScalingStepSize: 4
+          Status: ENABLED
+          TargetCapacity: 100
+        ManagedTerminationProtection: ENABLED
+
+  proyCapacityProviderAssociation:
+    Type: AWS::ECS::ClusterCapacityProviderAssociations
+    Properties:
+      CapacityProviders:
+        - !Ref proyCapacityProvider
+      Cluster: !Ref proyEcsCluster
+      DefaultCapacityProviderStrategy:
+        - Base: 0
+          CapacityProvider: !Ref proyCapacityProvider
+          Weight: 1
+
+  # Definición de tarea ECS
+  proyEcsTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${EnvironmentName}-Task
+      ExecutionRoleArn: arn:aws:iam::829511480989:role/LabRole
+      TaskRoleArn: arn:aws:iam::829511480989:role/LabRole
+      RequiresCompatibilities:
+        - EC2
+      Cpu: .25 vCPU
+      Memory: 0.5 GB
+      NetworkMode: awsvpc
+      ContainerDefinitions:
+        - Name: !Ref ServiceName
+          Image: !Ref ContainerImage
+          PortMappings:
+            - ContainerPort: 5000
+              Protocol: tcp
+              Name: flasktraffic
+              AppProtocol: http
+
+  # Security Group para el balanceador de carga
+  proyAlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for ALB"
+      VpcId:
+        Fn::ImportValue:
+          !Sub ${NetworkStackName}-proy-MyVPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  # Security Group para el servicio ECS
+  proyPrivateFlaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Allow traffic from ALB to ECS tasks"
+      VpcId:
+        Fn::ImportValue:
+          !Sub ${NetworkStackName}-proy-MyVPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          SourceSecurityGroupId: !Ref proyAlbSecurityGroup
+
+  # Balanceador de carga
+  proyAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${EnvironmentName}-ALB
+      IpAddressType: ipv4
+      SecurityGroups:
+        - !Ref proyAlbSecurityGroup
+      Subnets:
+        - Fn::ImportValue: !Sub ${NetworkStackName}-proy-PublicSubnet1Id
+        - Fn::ImportValue: !Sub ${NetworkStackName}-proy-PublicSubnet2Id
+
+  # Grupo de destino del ALB (Target Group)
+  proyEcsLoadBalancerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${EnvironmentName}-TargetGroup
+      Port: 5000
+      Protocol: HTTP
+      VpcId:
+        Fn::ImportValue:
+          !Sub ${NetworkStackName}-proy-MyVPCId
+      TargetType: ip
+      HealthyThresholdCount: 2
+      HealthCheckIntervalSeconds: 6
+      HealthCheckPath: "/health"
+      Matcher:
+        HttpCode: "200"
+
+  # Listener para el ALB
+  proyAlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: "forward"
+          TargetGroupArn: !Ref proyEcsLoadBalancerTargetGroup
+      LoadBalancerArn: !Ref proyAlb
+      Port: 80
+      Protocol: HTTP
+
+  # Servicio ECS
+  proyEcsService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - proyAlbListener
+    Properties:
+      ServiceName: !Sub ${EnvironmentName}-${ServiceName}
+      Cluster: !Ref proyEcsCluster
+      TaskDefinition: !Ref proyEcsTaskDefinition
+      DesiredCount: !Ref DesiredCount
+      AvailabilityZoneRebalancing: ENABLED
+      SchedulingStrategy: REPLICA
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - Fn::ImportValue: !Sub ${NetworkStackName}-proy-PrivateSubnet1Id
+            - Fn::ImportValue: !Sub ${NetworkStackName}-proy-PrivateSubnet2Id
+          SecurityGroups:
+            - !Ref proyPrivateFlaskSecurityGroup
+      LoadBalancers:
+        - TargetGroupArn: !Ref proyEcsLoadBalancerTargetGroup
+          ContainerName: !Ref ServiceName
+          ContainerPort: !Ref ContainerPort
+
+  # Escalabilidad para el servicio ECS
+  proyEcsScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn:
+      - proyEcsService
+    Properties:
+      MaxCapacity: 6
+      MinCapacity: 4
+      ServiceNamespace: ecs
+      ScalableDimension: 'ecs:service:DesiredCount'
+      ResourceId: !Sub service/${EnvironmentName}-Cluster/${EnvironmentName}-${ServiceName}
+
+  # Política de escalabilidad basada en el tráfico de ALB
+  proyServiceScalingPolicyAlb:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: AlbEcsPolicy
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref proyEcsScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 1000
+        ScaleInCooldown: 180
+        ScaleOutCooldown: 30
+        DisableScaleIn: true
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ALBRequestCountPerTarget
+          ResourceLabel: !Join
+            - '/'
+            - - !GetAtt proyAlb.LoadBalancerFullName
+              - !GetAtt proyEcsLoadBalancerTargetGroup.TargetGroupFullName

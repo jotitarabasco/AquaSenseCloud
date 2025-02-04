@@ -1,0 +1,275 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Plantilla de servidor para una instancia con instalación de Docker realizada en userdata y que utiliza recursos de red existentes de otra pila (VPC, subred, etc.).
+
+######################
+# Parameters section
+######################
+
+Parameters:
+
+  NetworkStackName:
+    Description: >-
+      Name of an active CloudFormation stack that contains the networking
+      resources, such as the VPC and subnet that will be used in this stack.
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: '^[a-zA-Z][-a-zA-Z0-9]*$'
+    Default: red
+
+######################
+# Resources section
+######################
+
+Resources:
+
+  # EC2 Instance in Private Subnet with Docker
+  proyDockerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: ami-08a0d1e16fc3f61ea
+      IamInstanceProfile: LabInstanceProfile
+      NetworkInterfaces:
+        - GroupSet:
+            - !Ref proyDockerSecurityGroup
+          AssociatePublicIpAddress: false
+          DeviceIndex: 0
+          DeleteOnTermination: true
+          SubnetId:
+            Fn::ImportValue:
+              !Sub ${NetworkStackName}-proy-PrivateSubnet1Id # Reemplaza con el ID de la subred privada 1 (región A)
+      Tags:
+        - Key: Name
+          Value: proy-Docker Server
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Actualizar el sistema
+          dnf update -y
+
+          # Instalar Docker
+          dnf -y install docker
+
+          # Habilitar e iniciar Docker
+          sudo systemctl enable docker
+          sudo systemctl start docker
+
+          # Crear el directorio para el código
+          mkdir -p /home/ec2-user/flask_docker
+
+          # Crear el archivo requirements.txt
+          cat > /home/ec2-user/flask_docker/requirements.txt << EOF
+          Flask==1.1.2
+          Werkzeug==1.0.1
+          Jinja2==2.11.3
+          MarkupSafe==1.1.1
+          itsdangerous==1.1.0
+          click==7.1.2
+          boto3==1.26.0
+          EOF
+
+          # Crear el archivo Dockerfile
+          cat > /home/ec2-user/flask_docker/Dockerfile << EOF
+          # syntax=docker/dockerfile:1.4
+          FROM python:3.8-alpine
+          WORKDIR /app
+          COPY requirements.txt requirements.txt
+          RUN pip3 install -r requirements.txt
+          COPY . . 
+          CMD [ "python3", "main.py" ]
+          EOF
+
+          # Crear el archivo main.py con el código de la aplicación
+          cat > /home/ec2-user/flask_docker/main.py << EOF
+          from flask import Flask, request, jsonify
+          import boto3
+          from boto3.dynamodb.conditions import Key
+
+          app = Flask(__name__)
+
+          dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+          table = dynamodb.Table("TemperatureData")
+
+          #Health
+          @app.route('/health')
+          def health():
+              return jsonify(status="healthy"), 200
+
+          #Maxdiff
+          @app.route('/maxdiff', methods=['GET'])
+          def maxdiff():
+              try:
+                  mes = request.args.get('month')
+                  año = request.args.get('year')
+
+                  if mes is None or año is None:
+                      return jsonify({"error": "Los parámetros 'month' y 'year' son obligatorios"}), 400
+                  mes = int(mes)
+                  año = int(año)
+                  if mes < 1 or mes > 12:
+                      return jsonify({"error": "El parámetro 'month' debe estar entre 1 y 12"}), 400
+                  if año < 0:
+                      return jsonify({"error": "El parámetro 'year' debe ser un número positivo"}), 400
+
+              except (ValueError, TypeError):
+                  return jsonify({"error": "Los parámetros 'month' y 'year' deben ser números válidos"}), 400
+
+              try:
+                  response = table.query(KeyConditionExpression=Key('Ano').eq(año) & Key('Mes').eq(mes))
+                  items = response.get('Items', [])
+                  
+                  if not items:
+                      return jsonify({"message": "No se encontraron resultados para la fecha proporcionada"}), 404
+                  max_diff = items[0].get('DiferenciaTempMax', None)
+
+                  if max_diff is None:
+                      return jsonify({"message": "No se encontró la diferencia de temperatura máxima para esta fecha"}), 404
+
+                  return jsonify({'Año': año, 'Mes': mes, 'Maxdiff': float(max_diff)}), 200
+
+              except Exception as e:
+                  return jsonify({"error": str(e)}), 500
+
+          #Desviación Típica
+          @app.route('/sd', methods=['GET'])
+          def sd():
+              try:
+                  mes = request.args.get('month')
+                  año = request.args.get('year')
+
+                  if mes is None or año is None:
+                      return jsonify({"error": "Los parámetros 'month' y 'year' son obligatorios"}), 400
+                  mes = int(mes)
+                  año = int(año)
+                  if mes < 1 or mes > 12:
+                      return jsonify({"error": "El parámetro 'month' debe estar entre 1 y 12"}), 400
+                  if año < 0:
+                      return jsonify({"error": "El parámetro 'year' debe ser un número positivo"}), 400
+
+              except (ValueError, TypeError):
+                  return jsonify({"error": "Los parámetros 'month' y 'year' deben ser números válidos"}), 400
+
+              try:
+                  response = table.query(KeyConditionExpression=Key('Ano').eq(año) & Key('Mes').eq(mes))
+                  items = response.get('Items', [])
+                  
+                  if not items:
+                      return jsonify({"message": "No se encontraron resultados para la fecha proporcionada"}), 404
+
+                  sd = items[0].get('MaxDesviacion', None)
+
+                  if sd is None:
+                      return jsonify({"message": "No se encontró la desviación típica para esta fecha"}), 404
+
+                  return jsonify({'Año': año, 'Mes': mes, 'DesviacionTipica': float(sd)}), 200
+
+              except Exception as e:
+                  return jsonify({"error": str(e)}), 500
+
+          #Temperatura Media
+          @app.route('/temp', methods=['GET'])
+          def temp():
+              try:
+                  mes = request.args.get('month')
+                  año = request.args.get('year')
+
+                  if mes is None or año is None:
+                      return jsonify({"error": "Los parámetros 'month' y 'year' son obligatorios"}), 400
+                  mes = int(mes)
+                  año = int(año)
+                  if mes < 1 or mes > 12:
+                      return jsonify({"error": "El parámetro 'month' debe estar entre 1 y 12"}), 400
+                  if año < 0:
+                      return jsonify({"error": "El parámetro 'year' debe ser un número positivo"}), 400
+                  
+              except (ValueError, TypeError):
+                  return jsonify({"error": "Los parámetros 'month' y 'year' deben ser números válidos"}), 400
+
+              try:
+                  response = table.query(KeyConditionExpression=Key('Ano').eq(año) & Key('Mes').eq(mes))
+                  items = response.get('Items', [])
+                  
+                  if not items:
+                      return jsonify({"message": "No se encontraron resultados para la fecha proporcionada"}), 404
+
+                  temp_media = items[0].get('TempMediaMensual', None)
+
+                  if temp_media is None:
+                      return jsonify({"message": "No se encontró la temperatura media para esta fecha"}), 404
+
+                  return jsonify({'Año': año, 'Mes': mes, 'TemperaturaMedia': float(temp_media)}), 200
+
+              except Exception as e:
+                  return jsonify({"error": str(e)}), 500
+
+          if __name__ == "__main__":
+              app.run(debug=True, host="0.0.0.0", port=5000)
+          EOF
+
+          # Construir la imagen Docker
+          cd /home/ec2-user/flask_docker
+          sudo docker build -t flask_app .
+
+          # Obtener la URL del repositorio ECR
+          repositorio="proy-repositorio"
+          region="us-east-1"
+          id_cuenta="829511480989"
+
+          # Login en ECR
+          sudo aws ecr get-login-password --region $region | sudo docker login --username AWS --password-stdin $id_cuenta.dkr.ecr.$region.amazonaws.com
+
+          # Etiquetar la imagen Docker con el repositorio ECR
+          docker tag flask_app:latest $id_cuenta.dkr.ecr.$region.amazonaws.com/$repositorio:latest
+
+          # Subir la imagen a ECR
+          docker push $id_cuenta.dkr.ecr.$region.amazonaws.com/$repositorio:latest
+
+  # Crear un volumen adicional para la instancia EC2
+  proyDiskVolume:
+    Type: AWS::EC2::Volume
+    Properties:
+      Size: 100
+      AvailabilityZone: !GetAtt proyDockerInstance.AvailabilityZone
+    DeletionPolicy: Snapshot
+
+  # Montar el volumen en la instancia
+  proyDiskMountPoint:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref proyDockerInstance
+      VolumeId: !Ref proyDiskVolume
+      Device: /dev/sdh
+
+  # Crear el Grupo de Seguridad para la Instancia EC2
+  proyDockerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Docker instance
+      VpcId:
+        Fn::ImportValue:
+          !Sub ${NetworkStackName}-proy-MyVPCId # Reemplaza con el ID del VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0 # Permitir tráfico para SSM desde cualquier IP
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          CidrIp: 10.0.0.0/16 # Permitir tráfico solo desde la VPC, incluidas las subredes privadas (10.0.3.0/24 y 10.0.4.0/24)
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0 # Permitir tráfico http mediante NAT para poder instalar docker y subir imagen a ecr. Después se podría quitar (no si hacemos autoescalado)
+      Tags:
+        - Key: Name
+          Value: proy-Docker Security Group
+
+Outputs:
+  EC2InstanceId:
+    Description: ID de la Instancia EC2
+    Value: !Ref proyDockerInstance
+    Export:
+      Name: proyDockerInstanceId

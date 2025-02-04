@@ -1,0 +1,295 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Plantilla para crear una VPC con subredes privadas y públicas, y configuraciones para VPC Endpoints para comunicación sin NAT Gateway.
+
+Resources:
+  # Repositorio
+  proyRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      EmptyOnDelete: True
+      RepositoryName: proy-repositorio
+
+  # 1. Crear la VPC
+  proyMyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: proy-MyVPC
+
+  # 2. Crear el Internet Gateway
+  proyMyInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: proy-MyInternetGateway
+
+  proyAttachInternetGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref proyMyVPC
+      InternetGatewayId: !Ref proyMyInternetGateway
+
+  # 3. Crear la Route Table para la Subred Pública
+  proyPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref proyMyVPC
+      Tags:
+        - Key: Name
+          Value: proy-PublicRouteTable
+
+  proyPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: proyAttachInternetGateway
+    Properties:
+      RouteTableId: !Ref proyPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref proyMyInternetGateway
+
+  # 4. Crear las Subredes Públicas
+  proyPublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref proyMyVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: us-east-1a
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: proy-PublicSubnet1
+
+  proyPublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref proyMyVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: us-east-1b
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: proy-PublicSubnet2
+
+  proyPublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref proyPublicSubnet1
+      RouteTableId: !Ref proyPublicRouteTable
+
+  proyPublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref proyPublicSubnet2
+      RouteTableId: !Ref proyPublicRouteTable
+
+  # 5. Crear las Subredes Privadas
+  proyPrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref proyMyVPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: us-east-1a
+      Tags:
+        - Key: Name
+          Value: proy-PrivateSubnet1
+
+  proyPrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref proyMyVPC
+      CidrBlock: 10.0.4.0/24
+      AvailabilityZone: us-east-1b
+      Tags:
+        - Key: Name
+          Value: proy-PrivateSubnet2
+
+  # 6. Crear Elastic IP para NAT Gateway
+  proyNatElasticIP:
+    Type: AWS::EC2::EIP
+    DependsOn: proyAttachInternetGateway
+    Properties:
+      Domain: vpc
+
+  # 7. Crear NAT Gateway
+  proyNatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt proyNatElasticIP.AllocationId
+      SubnetId: !Ref proyPublicSubnet1
+      Tags:
+        - Key: Name
+          Value: proy-NatGateway
+
+  # 8. Crear las Route Table para una subred privada (Donde estará el Docker)
+  proyPrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref proyMyVPC
+      Tags:
+        - Key: Name
+          Value: proy-PrivateRouteTable
+
+  # 9. Actualizar la ruta de la subred privada para que utilice el NAT Gateway
+  proyPrivateSubnet1Route:
+    Type: AWS::EC2::Route
+    DependsOn: proyNatGateway  # Asegura que la ruta se cree después de que el NAT Gateway esté disponible
+    Properties:
+      RouteTableId: !Ref proyPrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref proyNatGateway
+
+  #Asociamos las route table a las subredes
+  proyPrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref proyPrivateSubnet1
+      RouteTableId: !Ref proyPrivateRouteTable
+
+  # 10. Endpoints de VPC para SSM y DynamoDB (para servicios internos sin NAT Gateway)
+  proyVPCEndpointSSM:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssm
+      VpcId: !Ref proyMyVPC
+      VpcEndpointType: Interface
+      SubnetIds:
+        - !Ref proyPrivateSubnet1
+      SecurityGroupIds:
+        - !Ref proyVpcEndpointSecurityGroup
+      PrivateDnsEnabled: true
+
+  proyVPCEndpointSSMMessages:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssmmessages
+      VpcId: !Ref proyMyVPC
+      VpcEndpointType: Interface
+      SubnetIds:
+        - !Ref proyPrivateSubnet1
+      SecurityGroupIds:
+        - !Ref proyVpcEndpointSecurityGroup
+      PrivateDnsEnabled: true
+
+  proyVPCEndpointEC2Messages:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ec2messages
+      VpcId: !Ref proyMyVPC
+      VpcEndpointType: Interface
+      SubnetIds:
+        - !Ref proyPrivateSubnet1
+      SecurityGroupIds:
+        - !Ref proyVpcEndpointSecurityGroup
+      PrivateDnsEnabled: true
+
+  proyVPCEndpointDynamoDB:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.dynamodb
+      VpcId: !Ref proyMyVPC
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref proyPrivateRouteTable
+
+  # Endpoint para ECS
+  proyVpcEndpointEcs:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecs"
+      VpcId: !Ref proyMyVPC
+      SubnetIds:
+        - !Ref proyPrivateSubnet1
+        - !Ref proyPrivateSubnet2
+      VpcEndpointType: Interface
+      SecurityGroupIds:
+        - !Ref proyVpcEndpointSecurityGroup
+
+  # Endpoint para ECS Agent
+  proyVpcEndpointEcsAgent:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecs-agent"
+      VpcId: !Ref proyMyVPC
+      SubnetIds:
+        - !Ref proyPrivateSubnet1
+        - !Ref proyPrivateSubnet2
+      VpcEndpointType: Interface
+      SecurityGroupIds:
+        - !Ref proyVpcEndpointSecurityGroup
+
+  # Endpoint para ECR API
+  proyVpcEndpointEcrApi:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.api"
+      VpcId: !Ref proyMyVPC
+      SubnetIds:
+        - !Ref proyPrivateSubnet1
+        - !Ref proyPrivateSubnet2
+      VpcEndpointType: Interface
+      SecurityGroupIds:
+        - !Ref proyVpcEndpointSecurityGroup
+
+  # Endpoint para ECR DKR
+  proyVpcEndpointEcrDkr:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.dkr"
+      VpcId: !Ref proyMyVPC
+      SubnetIds:
+        - !Ref proyPrivateSubnet1
+        - !Ref proyPrivateSubnet2
+      VpcEndpointType: Interface
+      SecurityGroupIds:
+        - !Ref proyVpcEndpointSecurityGroup
+
+  # 11. Grupo de Seguridad para los Endpoints
+  proyVpcEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for VPC Endpoints"
+      VpcId: !Ref proyMyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: proy-VpcEndpointSecurityGroup
+
+Outputs:
+  PublicSubnet1Id:
+    Description: "Public Subnet 1 ID"
+    Value: !Ref proyPublicSubnet1
+    Export:
+      Name: !Sub "${AWS::StackName}-proy-PublicSubnet1Id"
+
+  PublicSubnet2Id:
+    Description: "Public Subnet 2 ID"
+    Value: !Ref proyPublicSubnet2
+    Export:
+      Name: !Sub "${AWS::StackName}-proy-PublicSubnet2Id"
+
+  PrivateSubnet1Id:
+    Description: "Private Subnet 1 ID"
+    Value: !Ref proyPrivateSubnet1
+    Export:
+      Name: !Sub "${AWS::StackName}-proy-PrivateSubnet1Id"
+
+  PrivateSubnet2Id:
+    Description: "Private Subnet 2 ID"
+    Value: !Ref proyPrivateSubnet2
+    Export:
+      Name: !Sub "${AWS::StackName}-proy-PrivateSubnet2Id"
+
+  MyVPCId:
+    Description: "VPC ID"
+    Value: !Ref proyMyVPC
+    Export:
+      Name: !Sub "${AWS::StackName}-proy-MyVPCId"
