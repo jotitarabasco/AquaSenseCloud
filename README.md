@@ -16,3 +16,7 @@
 - **Base de datos:** SQL y NoSQL  
 - **Infraestructura como código:** CloudFormation  
  
+## 👥 Colaboradores  
+- **José Francisco Rabasco** ([GitHub](https://github.com/jotitarabasco))  
+- **Nasim El Arifi Ahmed** ([GitHub](https://github.com/NOMBRE_DE_NASIM))  
+- **Jorge Ballesta Cerezo** ([GitHub](https://github.com/NOMBRE_DE_JORGE))  
