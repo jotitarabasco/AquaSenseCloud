@@ -13,7 +13,7 @@
 - **AWS:** ECS, ALB, S3, DynamoDB, Glue, SNS, QuickSight  
 - **Backend:** Python (Flask)  
 - **Contenedores:** Docker  
-- **Base de datos:** SQL y NoSQL  
+- **Base de datos:**  NoSQL  
 - **Infraestructura como código:** CloudFormation  
  
 ## 👥 Colaboradores  
