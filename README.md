@@ -18,5 +18,5 @@
  
 ## 👥 Colaboradores  
 - **José Francisco Rabasco** ([GitHub](https://github.com/jotitarabasco))  
-- **Nasim El Arifi Ahmed** ([GitHub](https://github.com/NOMBRE_DE_NASIM))  
-- **Jorge Ballesta Cerezo** ([GitHub](https://github.com/NOMBRE_DE_JORGE))  
+- **Nasim El Arifi Ahmed** ([GitHub](https://github.com/nasim23a))  
+- **Jorge Ballesta Cerezo** ([GitHub](https://github.com/jorgeballesta))  
